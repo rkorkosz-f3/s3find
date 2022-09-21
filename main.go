@@ -18,8 +18,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+const (
+	defaultConcurrency = 10
+	defaultBufferSize  = 1024
+)
+
 func main() {
-	concurrency := flag.Int("c", 10, "concurrency")
+	concurrency := flag.Int("c", defaultConcurrency, "concurrency")
 	flag.Parse()
 	if len(flag.Args()) < 2 {
 		log.Fatal("should provide s3 uri and query")
@@ -62,7 +67,7 @@ func main() {
 			for _, obj := range output.Contents {
 				wp.AddJob(func() {
 					defer wg.Done()
-					record, err := findInFile(ctx, cli, bucket, *obj.Key, query)
+					record, err := findInFile2(ctx, cli, bucket, *obj.Key, query)
 					if err != nil {
 						return
 					}
@@ -126,6 +131,42 @@ func findInFile(ctx context.Context, cli *s3.Client, bucket, key string, query *
 		}
 		if err := s.Err(); err != nil {
 			log.Println(err)
+		}
+	}()
+	return recordC, nil
+}
+
+func findInFile2(ctx context.Context, cli *s3.Client, bucket, key string, query *regexp.Regexp) (chan record, error) {
+	out, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return nil, err
+	}
+	recordC := make(chan record, 1)
+	go func() {
+		defer close(recordC)
+		defer out.Body.Close()
+		r, err := decode(out.Body, *out.ContentType)
+		if err != nil {
+			return
+		}
+		var buf []byte
+		for {
+			b := make([]byte, defaultBufferSize)
+			n, err := r.Read(b)
+			if err != nil && err != io.EOF {
+				fmt.Println(err)
+			}
+			if n == 0 {
+				break
+			}
+			match := query.Find(append(buf, b...))
+			if match != nil {
+				recordC <- record{line: string(buf), key: key}
+			}
+			buf = b
 		}
 	}()
 	return recordC, nil
